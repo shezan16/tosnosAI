@@ -1,0 +1,114 @@
+// TosnosAI Prisma Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String          @id @default(uuid())
+  email         String          @unique
+  name          String?
+  avatar        String?
+  role          String          @default("user")
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  conversations Conversation[]
+  memories      Memory[]
+  preferences   UserPreference?
+  voiceSessions VoiceSession[]
+  aiUsages      AIUsage[]
+}
+
+model Conversation {
+  id            String            @id @default(uuid())
+  title         String            @default("New Conversation")
+  userId        String?
+  user          User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  personality   String            @default("casual")
+  language      String            @default("auto")
+  isPinned      Boolean           @default(false)
+  summary       String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  messages      Message[]
+  voiceSessions VoiceSession[]
+}
+
+model Message {
+  id              String           @id @default(uuid())
+  conversationId  String
+  conversation    Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role            String           // "user" | "assistant" | "system"
+  content         String
+  audioUrl        String?
+  fileUrls        String?          // JSON array of file attachments
+  provider        String?          // "groq" | "gemini" | "fallback"
+  model           String?
+  createdAt       DateTime         @default(now())
+  emotionAnalysis EmotionAnalysis?
+}
+
+model EmotionAnalysis {
+  id             String   @id @default(uuid())
+  messageId      String   @unique
+  message        Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  emotion        String   // neutral, happy, sad, excited, angry, confused, etc.
+  intensity      Float    // 0.0 - 1.0
+  confidence     Float    // 0.0 - 1.0
+  tone           String   // cheerful, supportive, calm, etc.
+  language       String   // bn, en, banglish, etc.
+  suggestedEmoji String   // JSON string of emoji array
+  createdAt      DateTime @default(now())
+}
+
+model Memory {
+  id         String   @id @default(uuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key        String
+  value      String
+  category   String   @default("preference") // preference, detail, style
+  isEnabled  Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model UserPreference {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferredLanguage String   @default("auto")
+  preferredVoice    String   @default("default")
+  defaultPersonality String  @default("casual")
+  memoryEnabled     Boolean  @default(true)
+  theme             String   @default("dark")
+  updatedAt         DateTime @updatedAt
+}
+
+model VoiceSession {
+  id             String        @id @default(uuid())
+  userId         String?
+  user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  durationSec    Int           @default(0)
+  status         String        @default("completed") // completed, interrupted, failed
+  startedAt      DateTime      @default(now())
+  endedAt        DateTime?
+}
+
+model AIUsage {
+  id           String   @id @default(uuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider     String   // groq, gemini
+  model        String
+  tokensUsed   Int      @default(0)
+  requestType  String   // chat, voice, emotion, vision
+  createdAt    DateTime @default(now())
+}
