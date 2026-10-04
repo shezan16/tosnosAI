@@ -1,10 +1,13 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { VoiceMatcher, VoiceGender } from "@/lib/voice-matcher";
+import { AudioAnalyzer } from "@/lib/audio-analyzer";
+import { MicrophoneController, MicrophoneCallbacks, LanguageMode } from "@/lib/microphone-controller";
 
 export type VoiceState = 
   | "IDLE" 
-  | "LISTENING" 
+  | "LISTENING"
   | "PROCESSING" 
   | "THINKING" 
   | "SPEAKING" 
@@ -30,8 +33,8 @@ export interface MessageItem {
 
 export interface UseVoiceOptions {
   personality?: string;
-  languageMode?: string; // "auto" | "bn" | "en" | "casual"
-  onTranscriptChange?: (text: string) => void;
+  languageMode?: string; // "auto" | "bn" | "en"
+  voiceGender?: VoiceGender;
   onEmotionDetect?: (emotion: any) => void;
 }
 
@@ -43,135 +46,239 @@ export function useVoiceConversation(options: UseVoiceOptions = {}) {
   const [activeProvider, setActiveProvider] = useState<string>("groq");
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [debugPipelineInfo, setDebugPipelineInfo] = useState<any>(null);
 
-  const recognitionRef = useRef<any>(null);
-  const synthesisRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  // Speed & Mode Controls
+  const [isContinuousMode, setIsContinuousMode] = useState<boolean>(false);
+  const [speechRate, setSpeechRate] = useState<number>(1.0);
+  const speechRateRef = useRef<number>(1.0);
 
-  // 1. Initialize Speech Recognition
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = false;
-        recognition.interimResults = true;
-        recognition.lang = options.languageMode === "bn" ? "bn-BD" : "en-US";
+    speechRateRef.current = speechRate;
+  }, [speechRate]);
 
-        recognition.onstart = () => {
-          setVoiceState("LISTENING");
-          setErrorMsg(null);
-        };
+  // Persistent Voice Gender Preference
+  const [voiceGender, setVoiceGenderState] = useState<VoiceGender>("auto");
 
-        recognition.onresult = (event: any) => {
-          let currentText = "";
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            currentText += event.results[i][0].transcript;
-          }
-          setTranscript(currentText);
-          if (options.onTranscriptChange) {
-            options.onTranscriptChange(currentText);
-          }
-        };
+  useEffect(() => {
+    const saved = VoiceMatcher.getSavedGenderPreference();
+    setVoiceGenderState(saved);
+  }, []);
 
-        recognition.onerror = (event: any) => {
-          console.warn("Speech recognition notice:", event.error);
-          if (event.error !== "no-speech") {
-            setErrorMsg(`Mic input error: ${event.error}`);
-            setVoiceState("ERROR");
-          }
-        };
+  const setVoiceGender = (gender: VoiceGender) => {
+    setVoiceGenderState(gender);
+    VoiceMatcher.saveGenderPreference(gender);
+  };
 
-        recognition.onend = () => {
-          // If we finished listening and have text, trigger processing
-        };
+  // Refs for tracking active TTS objects
+  const synthesisRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const fallbackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const queueRef = useRef<string[]>([]);
+  const isQueueActiveRef = useRef<boolean>(false);
 
-        recognitionRef.current = recognition;
+  // Clean up on component unmount
+  useEffect(() => {
+    return () => {
+      isQueueActiveRef.current = false;
+      queueRef.current = [];
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
       }
-    }
-  }, [options.languageMode]);
+      if (fallbackAudioRef.current) {
+        fallbackAudioRef.current.pause();
+        fallbackAudioRef.current = null;
+      }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
-  // 2. Immediate Interruption Engine
+  // Interruption Engine (Stop TTS Playback)
   const interrupt = useCallback(() => {
-    // A. Stop active TTS synthesis
-    if (typeof window !== "undefined" && window.speechSynthesis) {
+    isQueueActiveRef.current = false;
+    queueRef.current = [];
+
+    try {
+      MicrophoneController.getInstance().abortSession();
+    } catch (e) {}
+
+    try {
+      AudioAnalyzer.getInstance().setSyntheticSpeaking(false);
+    } catch (e) {}
+
+    // Cancel SpeechSynthesis
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
+    if (fallbackAudioRef.current) {
+      fallbackAudioRef.current.pause();
+      fallbackAudioRef.current = null;
+    }
 
-    // B. Abort ongoing network stream fetch
+    // Abort pending API request
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
 
-    // C. Transition state to INTERRUPTED then back to LISTENING
-    setVoiceState("INTERRUPTED");
-    setTimeout(() => {
-      setVoiceState("LISTENING");
-      if (recognitionRef.current) {
-        try { recognitionRef.current.start(); } catch (e) {}
-      }
-    }, 400);
+    setVoiceState("IDLE");
   }, []);
 
-  // 3. Text-to-Speech with Emotion Voice Modulation
+  // TTS Engine (Text-to-Speech)
   const speakResponse = useCallback((text: string, emotionObj?: any) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window) || isMuted) {
+    if (isMuted) {
       setVoiceState("IDLE");
       return;
     }
 
-    window.speechSynthesis.cancel(); // Clear queue
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    
-    // Set pitch & rate based on emotion
-    const emotion = emotionObj?.emotion || "neutral";
-    if (emotion === "happy" || emotion === "excited") {
-      utterance.pitch = 1.25;
-      utterance.rate = 1.1;
-    } else if (emotion === "sad" || emotion === "worried") {
-      utterance.pitch = 0.85;
-      utterance.rate = 0.9;
-    } else if (emotion === "romantic" || emotion === "affectionate") {
-      utterance.pitch = 1.05;
-      utterance.rate = 0.95;
-    } else {
-      utterance.pitch = 1.0;
-      utterance.rate = 1.0;
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      console.warn("[TTS] SpeechSynthesis not available in browser.");
+      setVoiceState("IDLE");
+      return;
     }
 
-    // Select language voice matching output
-    const lang = emotionObj?.language || "bn";
-    if (lang === "bn" || lang === "banglish") {
-      utterance.lang = "bn-BD";
-    } else {
-      utterance.lang = "en-US";
+    const sanitized = VoiceMatcher.sanitizeTextForSpeech(text) || text;
+    if (!sanitized || !sanitized.trim()) {
+      setVoiceState("IDLE");
+      return;
     }
 
-    utterance.onstart = () => {
-      setVoiceState("SPEAKING");
+    console.log("[TTS] text:", sanitized);
+
+    const chunks = VoiceMatcher.splitTextIntoSpeechChunks(sanitized, 170);
+    const speechChunks = chunks && chunks.length > 0 ? chunks : [sanitized];
+
+    queueRef.current = speechChunks;
+    isQueueActiveRef.current = true;
+
+    const playChunkIndex = (index: number) => {
+      if (!isQueueActiveRef.current || index >= queueRef.current.length) {
+        isQueueActiveRef.current = false;
+        queueRef.current = [];
+        try {
+          AudioAnalyzer.getInstance().setSyntheticSpeaking(false);
+        } catch (e) {}
+        setVoiceState("IDLE");
+        return;
+      }
+
+      const chunkText = queueRef.current[index];
+      if (!chunkText || !chunkText.trim()) {
+        playChunkIndex(index + 1);
+        return;
+      }
+
+      const isBangla = /[\u0980-\u09FF]/.test(chunkText) || (emotionObj?.language === "bn" || emotionObj?.language === "banglish");
+      const targetLang = isBangla ? "bn-BD" : "en-US";
+      console.log("[TTS] language:", targetLang);
+
+      const genderPref = options.voiceGender || voiceGender;
+      const voiceResult = VoiceMatcher.findBestVoice(chunkText, genderPref, targetLang);
+      const selectedVoice = voiceResult.voice;
+      console.log("[TTS] voice:", selectedVoice ? selectedVoice.name : "default");
+
+      if (isBangla && !voiceResult.hasNativeVoice) {
+        try {
+          const audioUrl = `/api/tts?text=${encodeURIComponent(chunkText)}&lang=bn`;
+          const audio = new Audio(audioUrl);
+          fallbackAudioRef.current = audio;
+
+          try {
+            AudioAnalyzer.getInstance().connectAudioElement(audio);
+          } catch (e) {}
+
+          audio.onplay = () => {
+            console.log("[TTS] started");
+            setVoiceState("SPEAKING");
+          };
+          audio.onended = () => {
+            console.log("[TTS] ended");
+            if (isQueueActiveRef.current) playChunkIndex(index + 1);
+          };
+          audio.onerror = (e) => {
+            console.error("[TTS] error:", e);
+            speakWebSpeechUtterance(chunkText, targetLang, selectedVoice, index);
+          };
+
+          audio.play().catch((err) => {
+            console.warn("[TTS] fallback audio play notice:", err);
+            speakWebSpeechUtterance(chunkText, targetLang, selectedVoice, index);
+          });
+          return;
+        } catch (err) {
+          console.warn("[TTS] fallback audio init notice:", err);
+        }
+      }
+
+      speakWebSpeechUtterance(chunkText, targetLang, selectedVoice, index);
     };
 
-    utterance.onend = () => {
-      setVoiceState("IDLE");
+    const speakWebSpeechUtterance = (chunkText: string, targetLang: string, voice: SpeechSynthesisVoice | null, index: number) => {
+      try {
+        window.speechSynthesis.cancel();
+
+        const utterance = new SpeechSynthesisUtterance(chunkText);
+        utterance.lang = targetLang;
+
+        if (voice) {
+          utterance.voice = voice;
+        }
+
+        const currentRate = speechRateRef.current || 1.0;
+        utterance.rate = Math.max(0.5, Math.min(2.0, currentRate));
+        utterance.pitch = (options.voiceGender || voiceGender) === "female" ? 1.1 : (options.voiceGender || voiceGender) === "male" ? 0.9 : 1.0;
+
+        utterance.onstart = () => {
+          console.log("[TTS] started");
+          try {
+            AudioAnalyzer.getInstance().setSyntheticSpeaking(true);
+          } catch (e) {}
+          setVoiceState("SPEAKING");
+        };
+
+        utterance.onend = () => {
+          console.log("[TTS] ended");
+          try {
+            AudioAnalyzer.getInstance().setSyntheticSpeaking(false);
+          } catch (e) {}
+          if (isQueueActiveRef.current) {
+            playChunkIndex(index + 1);
+          }
+        };
+
+        utterance.onerror = (event) => {
+          console.error("[TTS] error", event);
+          try {
+            AudioAnalyzer.getInstance().setSyntheticSpeaking(false);
+          } catch (e) {}
+          if (isQueueActiveRef.current) {
+            playChunkIndex(index + 1);
+          }
+        };
+
+        synthesisRef.current = utterance;
+        window.speechSynthesis.resume();
+        window.speechSynthesis.speak(utterance);
+      } catch (err) {
+        console.error("[TTS] error", err);
+        try {
+          AudioAnalyzer.getInstance().setSyntheticSpeaking(false);
+        } catch (e) {}
+        if (isQueueActiveRef.current) {
+          playChunkIndex(index + 1);
+        }
+      }
     };
 
-    utterance.onerror = (e) => {
-      console.warn("TTS utterance notice:", e);
-      setVoiceState("IDLE");
-    };
+    playChunkIndex(0);
+  }, [isMuted, voiceGender, options.voiceGender]);
 
-    synthesisRef.current = utterance;
-    window.speechSynthesis.speak(utterance);
-  }, [isMuted]);
-
-  // 4. Send message to AI & handle emotion, routing, streaming
-  const sendMessage = useCallback(async (userText: string, fileAttachments?: any[]) => {
+  // Keyboard Message Submission -> AI API -> TTS
+  const sendMessage = useCallback(async (userText: string, fileAttachments?: any[], skipVoice?: boolean) => {
     if (!userText.trim() && (!fileAttachments || fileAttachments.length === 0)) return;
 
-    // If AI is currently speaking, user interupts
     if (voiceState === "SPEAKING") {
       interrupt();
     }
@@ -185,7 +292,8 @@ export function useVoiceConversation(options: UseVoiceOptions = {}) {
     };
 
     setMessages((prev) => [...prev, userMsg]);
-    setTranscript("");
+
+    console.log("[AI] request", userText);
 
     try {
       abortControllerRef.current = new AbortController();
@@ -208,7 +316,14 @@ export function useVoiceConversation(options: UseVoiceOptions = {}) {
       }
 
       const data = await res.json();
+      const responseText = data.response;
       
+      if (!responseText || !responseText.trim()) {
+        throw new Error("Empty AI response received");
+      }
+
+      console.log("[AI] response", responseText);
+
       if (data.emotion) {
         setCurrentEmotion(data.emotion);
         if (options.onEmotionDetect) options.onEmotionDetect(data.emotion);
@@ -219,7 +334,7 @@ export function useVoiceConversation(options: UseVoiceOptions = {}) {
       const assistantMsg: MessageItem = {
         id: `msg-${Date.now() + 1}`,
         role: "assistant",
-        content: data.response,
+        content: responseText,
         emotion: data.emotion,
         provider: data.provider,
         model: data.model,
@@ -227,50 +342,107 @@ export function useVoiceConversation(options: UseVoiceOptions = {}) {
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
-      speakResponse(data.response, data.emotion);
+
+      if (skipVoice) {
+        setVoiceState("IDLE");
+      } else {
+        speakResponse(responseText, data.emotion);
+      }
 
     } catch (err: any) {
       if (err.name === "AbortError") {
-        console.log("Fetch aborted by interruption");
+        console.log("[TosnosAI Voice] Fetch aborted by user interruption");
         return;
       }
-      console.error("Voice conversation error:", err);
+      console.error("[TosnosAI Voice] Conversation error:", err);
       setErrorMsg("Failed to connect to AI engine");
       setVoiceState("ERROR");
     }
-  }, [voiceState, interrupt, options.languageMode, options.personality, messages, speakResponse, options.onEmotionDetect]);
-
-  // 5. Start / Stop listening controls
-  const startListening = useCallback(() => {
-    if (voiceState === "SPEAKING") {
-      interrupt();
-      return;
-    }
-    setTranscript("");
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.start();
-      } catch (e) {
-        setVoiceState("LISTENING");
-      }
-    } else {
-      setVoiceState("LISTENING");
-    }
-  }, [voiceState, interrupt]);
-
-  const stopListening = useCallback(() => {
-    if (recognitionRef.current) {
-      try { recognitionRef.current.stop(); } catch (e) {}
-    }
-    if (transcript.trim()) {
-      sendMessage(transcript);
-    } else {
-      setVoiceState("IDLE");
-    }
-  }, [transcript, sendMessage]);
+  }, [voiceState, interrupt, options.languageMode, options.personality, options.onEmotionDetect, messages, speakResponse]);
 
   const toggleMute = useCallback(() => {
-    setIsMuted(prev => !prev);
+    setIsMuted((prev) => !prev);
+  }, []);
+
+  const clearMessages = useCallback(() => {
+    setMessages([]);
+  }, []);
+
+  const startListening = useCallback(async (customCallbacks?: MicrophoneCallbacks) => {
+    if (typeof window === "undefined") return;
+
+    const SpeechRecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    const hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+    if (!SpeechRecognitionClass && !hasGetUserMedia) {
+      const msg = "Speech recognition is not supported in this browser.";
+      setErrorMsg(msg);
+      if (customCallbacks?.onError) customCallbacks.onError(msg);
+      return;
+    }
+
+    if (voiceState === "SPEAKING") {
+      interrupt();
+    }
+
+    setVoiceState("LISTENING");
+    setErrorMsg(null);
+    setTranscript("");
+
+    const langMode = (options.languageMode as LanguageMode) || "auto";
+
+    try {
+      await MicrophoneController.getInstance().startSession(langMode, {
+        onStart: () => {
+          setVoiceState("LISTENING");
+          if (customCallbacks?.onStart) customCallbacks.onStart();
+        },
+        onTranscript: (text, isFinal) => {
+          setTranscript(text);
+          if (customCallbacks?.onTranscript) customCallbacks.onTranscript(text, isFinal);
+        },
+        onError: (err) => {
+          console.warn("[STT Error]", err);
+          let friendlyError = err;
+          if (err.includes("permission") || err.includes("not-allowed") || err.includes("Denied")) {
+            friendlyError = "Microphone permission is required.";
+          } else if (err.includes("not supported")) {
+            friendlyError = "Speech recognition is not supported in this browser.";
+          } else if (err.includes("no-speech")) {
+            friendlyError = "No speech detected. Please try speaking again.";
+          }
+          setErrorMsg(friendlyError);
+          setVoiceState("IDLE");
+          if (customCallbacks?.onError) customCallbacks.onError(friendlyError);
+        },
+        onComplete: (finalText) => {
+          setTranscript(finalText);
+          setVoiceState("IDLE");
+          if (customCallbacks?.onComplete) customCallbacks.onComplete(finalText);
+        }
+      });
+    } catch (err: any) {
+      console.error("[Microphone] Error starting session:", err);
+      let friendlyError = "Microphone is unavailable or in use.";
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        friendlyError = "Microphone permission is required.";
+      }
+      setErrorMsg(friendlyError);
+      setVoiceState("IDLE");
+      if (customCallbacks?.onError) customCallbacks.onError(friendlyError);
+    }
+  }, [voiceState, interrupt, options.languageMode]);
+
+  const stopListening = useCallback(async () => {
+    try {
+      const finalText = await MicrophoneController.getInstance().stopSession();
+      setTranscript(finalText);
+      setVoiceState("IDLE");
+      return finalText;
+    } catch (err) {
+      setVoiceState("IDLE");
+      return "";
+    }
   }, []);
 
   return {
@@ -279,14 +451,25 @@ export function useVoiceConversation(options: UseVoiceOptions = {}) {
     transcript,
     setTranscript,
     messages,
+    setMessages,
+    clearMessages,
     currentEmotion,
     activeProvider,
     isMuted,
     toggleMute,
     errorMsg,
+    voiceGender,
+    setVoiceGender,
+    isContinuousMode,
+    setIsContinuousMode,
+    speechRate,
+    setSpeechRate,
+    debugPipelineInfo,
+    setDebugPipelineInfo,
     startListening,
     stopListening,
     interrupt,
-    sendMessage
+    sendMessage,
+    speakResponse
   };
 }

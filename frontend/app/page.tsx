@@ -123,6 +123,7 @@ export default function Home() {
                 setLanguageMode={setLanguageMode}
                 personality={personality}
                 setPersonality={setPersonality}
+                debugPipelineInfo={voice.debugPipelineInfo}
               />
             </motion.div>
           )}

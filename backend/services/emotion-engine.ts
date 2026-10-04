@@ -9,8 +9,25 @@ export interface EmotionAnalysisResult {
 
 export class NodeEmotionEngine {
   private static BANGLISH_PATTERNS = [
-    /\b(ajke|amr|amar|tumi|apni|kemon|acho|achhen|khoob|valo|bhalo|korte|parbo|hobe|hoise|hoiya|korbo|bhai|bhaiya|jan|shono|bolo|bolen|hoga|hobena|keno|kene|ki|kichu|kol|kore|kotha|kothay|dhaka|bangla|khub|pari|parbo)\b/i,
-    /\b(mon|shathe|tarpor|ekhon|ekhoni|besh|khabar|pani|bari|groho|khabar|dakho|dekhe|dekhi)\b/i
+    /\b(ajke|amr|amar|tumi|apni|kemon|acho|achhen|khoob|valo|bhalo|korte|parbo|hobe|hoise|hoiya|korbo|bhai|bhaiya|jan|shono|bolo|bolen|hoga|hobena|keno|kene|ki|kichu|kol|kore|kotha|kothay|dhaka|bangla|khub|pari|parbo|banate|parba|sakha|tomar|nam|name|kamne|kivabe|ekhon|ekhoni|tarpor|thik|ache|aso|aisha|jai|jao|jabo|korba|khabo|pawoa|shundor|mon|kharap|sahajjo|sahajo|dorkar|parben)\b/i,
+    /\b(mon|shathe|tarpor|ekhon|ekhoni|besh|khabar|pani|bari|groho|khabar|dakho|dekhe|dekhi|parben|hobe)\b/i
+  ];
+
+  private static PHONETIC_ENGLISH_BANGLA_WORDS = [
+    "হ্যালো", "হাই", "হাউ", "আর", "ইউ", "হোয়াট", "হোয়াটস", "ইজ", "দিস", "দ্যাট",
+    "ক্যান", "কোড", "কোডিং", "প্রোগ্রামিং", "জাভাস্ক্রিপ্ট", "পাইথন", "এআই", "এপিআই",
+    "লিংকড", "লিস্ট", "ডাটা", "ওয়েবসাইট", "ওয়েবসাইটটি", "সার্ভার", "ডাটাবেস", "থ্যাংক",
+    "থ্যাঙ্কস", "প্লিজ", "হেল্প", "এক্সপ্লেন", "টেল", "মি", "এবাউট", "কম্পিউটার", "গুড",
+    "মর্নিং", "ইভনিং", "নাইট", "ওকে", "বাই", "ফাইন্ড", "ক্রিয়েট", "বিল্ড", "ভেরিয়েবল",
+    "ফাংশন", "অ্যালগরিদম", "রিয়্যাক্ট", "নেক্সট", "টাইপস্ক্রিপ্ট", "সফটওয়্যার", "ডেভেলপার",
+    "ইনফরমেশন", "সিস্টেম", "মেসেজ", "ভয়েস", "ইন্টারনেট", "ব্রাউজার"
+  ];
+
+  private static NATIVE_BANGLA_WORDS = [
+    "তুমি", "কেমন", "আছো", "আছেন", "আমি", "ভালো", "আছি", "ধন্যবাদ", "কী", "করছ",
+    "করছো", "বলো", "বলেন", "তোমার", "আপনার", "নাম", "আজকে", "কাজ", "সাহায্য", "করবে",
+    "পারো", "পারবেন", "একটা", "আমাদের", "বন্ধু", "কোথায়", "কখন", "কেন", "কিভাবে", "কিনা",
+    "যাব", "যাবো", "খাব", "খাবো", "মন", "খারাপ", "কষ্ট", "খুশি", "কথা", "বলতে", "চাই"
   ];
 
   private static EMOTION_KEYWORD_MAP: Record<string, { keywords: string[]; emojis: string[] }> = {
@@ -52,30 +69,48 @@ export class NodeEmotionEngine {
     }
   };
 
-  public static detectLanguage(text: string): string {
-    if (!text || !text.trim()) return "en";
+  /**
+   * Detects the primary language/script of an incoming message independently.
+   * Returns: "en" | "bn" | "banglish" | "mixed" | "unknown"
+   */
+  public static detectMessageLanguage(text: string): string {
+    if (!text || !text.trim()) return "unknown";
     const textClean = text.trim();
-    const bengaliChars = (textClean.match(/[\u0980-\u09FF]/g) || []).length;
-    const totalChars = textClean.replace(/\s+/g, "").length || 1;
 
-    if (bengaliChars / totalChars > 0.3) {
-      const latinCount = (textClean.match(/[a-zA-Z]/g) || []).length;
-      return latinCount > 3 ? "mixed" : "bn";
+    // 1. Count Bengali Unicode script characters (\u0980-\u09FF)
+    const bengaliMatches = textClean.match(/[\u0980-\u09FF]/g);
+    const bengaliCount = bengaliMatches ? bengaliMatches.length : 0;
+
+    // Count English / Latin alphabet characters
+    const latinMatches = textClean.match(/[a-zA-Z]/g);
+    const latinCount = latinMatches ? latinMatches.length : 0;
+
+    // Pure or Dominant Bengali Unicode script
+    if (bengaliCount > 0) {
+      if (latinCount === 0) return "bn";
+      if (bengaliCount >= latinCount) return "bn";
+      return "mixed";
     }
 
-    if (/[\u0900-\u097F]/.test(textClean)) return "hi";
-    if (/[\u0600-\u06FF]/.test(textClean)) return "ar";
-    if (/[\u3040-\u30FF\u4E00-\u9FFF]/.test(textClean)) return "ja";
-    if (/[\u4E00-\u9FFF]/.test(textClean)) return "zh";
+    // Check for other non-Latin scripts
+    if (/[\u0900-\u097F]/.test(textClean)) return "mixed";
+    if (/[\u0600-\u06FF]/.test(textClean)) return "mixed";
+    if (/[\u3040-\u30FF\u4E00-\u9FFF]/.test(textClean)) return "mixed";
 
+    // Banglish (Bengali in Latin script) check
     for (const pattern of this.BANGLISH_PATTERNS) {
       if (pattern.test(textClean)) return "banglish";
     }
 
-    if (/[áéíóúñ¿¡]/i.test(textClean)) return "es";
-    if (/[éèêëàâùûçœæ]/i.test(textClean)) return "fr";
-    if (/[äöüß]/i.test(textClean)) return "de";
+    if (latinCount > 0) return "en";
+    return "unknown";
+  }
 
+  public static detectLanguage(text: string): string {
+    const lang = this.detectMessageLanguage(text);
+    if (lang === "banglish") return "banglish";
+    if (lang === "bn") return "bn";
+    if (lang === "mixed") return "bn";
     return "en";
   }
 

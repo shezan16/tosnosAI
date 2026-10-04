@@ -11,14 +11,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Message content or attachment is required" }, { status: 400 });
     }
 
+    // Force strict per-message language detection for accuracy
+    const currentMessageLang = NodeEmotionEngine.detectMessageLanguage(message || "");
+
     // 1. Multilingual Emotion Analysis
-    const emotionResult = NodeEmotionEngine.analyze(message || "File attachment", language);
+    const emotionResult = NodeEmotionEngine.analyze(message || "File attachment", currentMessageLang);
 
     // 2. AI Router Decision & Response Generation
     const result = await AIRouter.generateResponse({
       routingInput: {
         message: message || "Please inspect this file/image.",
-        language: emotionResult.language,
+        language: currentMessageLang,
         emotion: emotionResult.emotion,
         personality: personality || "casual",
         requiresVision: fileAttachments && fileAttachments.length > 0,

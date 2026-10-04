@@ -61,12 +61,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
         
         {/* 1. Brand Logo Header matching screenshot media_1790714067116.png */}
         <div className="flex items-center gap-3 px-2 py-2 mb-2">
-          {/* TOSNOS Metallic Circular Emblem */}
+          {/* TOSNOS Metallic Circular Emblem from uploaded image */}
           <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-slate-200 via-slate-100 to-slate-400 p-[2px] shadow-md flex items-center justify-center shrink-0">
-            <div className="w-full h-full rounded-full bg-slate-950 flex items-center justify-center text-white font-bold text-xs relative overflow-hidden">
-              <span className="text-[10px] tracking-tighter font-extrabold bg-gradient-to-r from-slate-100 to-slate-300 bg-clip-text text-transparent">
-                TOS
-              </span>
+            <div className="w-full h-full rounded-full bg-slate-950 flex items-center justify-center relative overflow-hidden">
+              <img
+                src="/tosnos-logo.jpg"
+                alt="TosnosAI Metallic Logo"
+                className="w-full h-full object-cover rounded-full select-none"
+              />
             </div>
           </div>
           <div>
@@ -77,7 +79,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <Sparkles className="w-3.5 h-3.5 text-blue-600 dark:text-indigo-400" />
             </div>
             <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium">
-              Don't type. Just talk.
+              Type and talk
             </p>
           </div>
         </div>
