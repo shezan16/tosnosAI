@@ -11,6 +11,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState("home");
+  const [headerMode, setHeaderMode] = useState<"chat" | "voice" | "create" | "tools">("voice");
   const [isVoiceOpen, setIsVoiceOpen] = useState(true); // Default open matching screenshot layout
   const [isOpenMobile, setIsOpenMobile] = useState(false);
   const [languageMode, setLanguageMode] = useState("auto");
@@ -34,6 +35,18 @@ export default function Home() {
     personality
   });
 
+  const handleSelectMode = (mode: "chat" | "voice" | "create" | "tools") => {
+    setHeaderMode(mode);
+    if (mode === "voice") {
+      setIsVoiceOpen(true);
+      setTimeout(() => {
+        voice.startListening();
+      }, 150);
+    } else {
+      setIsVoiceOpen(false);
+    }
+  };
+
   const handleNewChat = () => {
     const newConv = {
       id: `conv-${Date.now()}`,
@@ -55,7 +68,7 @@ export default function Home() {
       <Sidebar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        onOpenVoiceMode={() => setIsVoiceOpen(true)}
+        onOpenVoiceMode={() => handleSelectMode("voice")}
         onNewChat={handleNewChat}
         conversations={conversations}
         currentConvId={currentConvId}
@@ -69,11 +82,19 @@ export default function Home() {
       <div className="flex-1 h-full flex overflow-hidden relative">
         {activeTab === "home" && (
           <MainDashboard
-            onOpenVoiceMode={() => setIsVoiceOpen(true)}
+            onOpenVoiceMode={() => handleSelectMode("voice")}
+            activeMode={headerMode}
+            onSelectMode={handleSelectMode}
             messages={voice.messages}
             onSendMessage={voice.sendMessage}
             onOpenMobileSidebar={() => setIsOpenMobile(true)}
             isThinking={voice.voiceState === "THINKING" || voice.voiceState === "PROCESSING"}
+            onSpeakText={voice.speakResponse}
+            voiceState={voice.voiceState}
+            onStartListening={voice.startListening}
+            onStopListening={voice.stopListening}
+            transcript={voice.transcript}
+            errorMsg={voice.errorMsg}
           />
         )}
 
@@ -109,7 +130,7 @@ export default function Home() {
           >
             <VoicePanel
               isOpen={isVoiceOpen}
-              onClose={() => setIsVoiceOpen(false)}
+              onClose={() => handleSelectMode("chat")}
               state={voice.voiceState}
               transcript={voice.transcript}
               emotion={voice.currentEmotion}
@@ -124,6 +145,12 @@ export default function Home() {
               setLanguageMode={setLanguageMode}
               personality={personality}
               setPersonality={setPersonality}
+              voiceGender={voice.voiceGender}
+              setVoiceGender={voice.setVoiceGender}
+              isContinuousMode={voice.isContinuousMode}
+              setIsContinuousMode={voice.setIsContinuousMode}
+              speechRate={voice.speechRate}
+              setSpeechRate={voice.setSpeechRate}
             />
           </motion.div>
         )}

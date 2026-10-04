@@ -11,15 +11,48 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Message content or attachment is required" }, { status: 400 });
     }
 
-    // 1. Multilingual Emotion Analysis
-    const emotionResult = NodeEmotionEngine.analyze(message || "File attachment", language);
+    // 1. Multilingual Emotion Analysis (Attempt Python FastAPI Emotion AI Service first, fallback to Node Engine)
+    let emotionResult: any = null;
+    const pythonApiUrl = process.env.EMOTION_API_URL || "http://localhost:8001";
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500); // 2.5s timeout
+
+      const emoRes = await fetch(`${pythonApiUrl}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          text: message || "File attachment",
+          context: (history || []).slice(-4)
+        })
+      });
+      clearTimeout(timeoutId);
+
+      if (emoRes.ok) {
+        emotionResult = await emoRes.json();
+      }
+    } catch (e: any) {
+      console.warn("Python Emotion Service notice (using fallback engine):", e.message || e);
+    }
+
+    // Force strict per-message language detection for accuracy
+    const currentMessageLang = NodeEmotionEngine.detectLanguage(message || "");
+
+    // Fallback if Python service is offline or timed out
+    if (!emotionResult) {
+      emotionResult = NodeEmotionEngine.analyze(message || "File attachment", currentMessageLang);
+    } else {
+      emotionResult.language = currentMessageLang;
+    }
 
     // 2. AI Router Decision & Response Generation
     const result = await AIRouter.generateResponse({
       routingInput: {
         message: message || "Please inspect this file/image.",
-        language: emotionResult.language,
-        emotion: emotionResult.emotion,
+        language: currentMessageLang,
+        emotion: emotionResult,
         personality: personality || "casual",
         requiresVision: fileAttachments && fileAttachments.length > 0,
         requiresLongContext: (message || "").length > 1000,
